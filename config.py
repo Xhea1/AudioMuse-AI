@@ -467,7 +467,10 @@ CLUSTERING_MAX_STALL_GIVE_UPS = int(os.environ.get("CLUSTERING_MAX_STALL_GIVE_UP
 
 # --- Batching Constants for Analysis ---
 REBUILD_INDEX_BATCH_SIZE = int(os.environ.get("REBUILD_INDEX_BATCH_SIZE", "1000")) # Rebuild IVF index after this many albums are analyzed.
-AUDIO_LOAD_TIMEOUT = int(os.getenv("AUDIO_LOAD_TIMEOUT", "600")) # Timeout in seconds for loading a single audio file.
+# Narrative mode (spoken-word/audiobooks) is per instance, not per library: it changes how every track is analysed,
+# so do not mix it with a music library. It lifts the audio length caps below and turns the MusiCNN "instrumental" skip off.
+LYRICS_NARRATIVE_MODE = os.environ.get("LYRICS_NARRATIVE_MODE", "false").lower() == "true"
+AUDIO_LOAD_TIMEOUT = int(os.getenv("AUDIO_LOAD_TIMEOUT", "7200" if LYRICS_NARRATIVE_MODE else "600")) # Timeout in seconds for loading a single audio file.
 AUDIO_MIN_DECODED_FRACTION = float(os.getenv("AUDIO_MIN_DECODED_FRACTION", "0.5")) # Applies to the PyAV fallback only, never to a plain librosa load. When PyAV has to skip corrupt packets, at least this fraction of the duration the container declares must survive, otherwise the track counts as not decodable and is marked as such.
 ANALYSIS_MONITOR_DB_INTERVAL = int(os.environ.get("ANALYSIS_MONITOR_DB_INTERVAL", "10")) # Min seconds between DB child-status reconciliations in the analysis monitor (0 = every poll; active jobs drain via the queue every poll regardless).
 
@@ -1024,7 +1027,7 @@ LYRICS_ENABLED = os.environ.get("LYRICS_ENABLED", "true").lower() == "true"
 # When true, look up lyrics from user-configured external APIs before falling back to Whisper-small ASR.
 LYRICS_API_ENABLE = os.environ.get("LYRICS_API_ENABLE", "true").lower() == "true"
 LYRICS_ASR_ENABLE = os.environ.get("LYRICS_ASR_ENABLE", "true").lower() == "true"
-LYRICS_MUSICNN_SKIP = os.environ.get("LYRICS_MUSICNN_SKIP", "true").lower() == "true"
+LYRICS_MUSICNN_SKIP = os.environ.get("LYRICS_MUSICNN_SKIP", "false" if LYRICS_NARRATIVE_MODE else "true").lower() == "true"
 # Timeout (seconds) for fetching embedded lyrics from the configured media server
 # (Jellyfin / Emby / Navidrome / Lyrion). Increase if your server fetches lyrics
 # on-the-fly via plugins (e.g. Navidrome lyrics plugins) that may take several

@@ -23,6 +23,10 @@ Main Features:
   and a CJK-script override for mislabeled non-Latin transcripts.
 * Runs Whisper under a 300s SIGALRM watchdog guarded by hasattr(signal,
   'SIGALRM') so it degrades to no timeout on platforms without the signal.
+* Narrative mode (LYRICS_NARRATIVE_MODE, spoken-word/audiobooks): transcribes the
+  whole file, embeds the transcript in character chunks averaged by length into
+  one vector per work, and blends the title (with its [tags]) in at
+  LYRICS_NARRATIVE_TITLE_WEIGHT; with no speech the title is the whole vector.
 """
 
 from __future__ import annotations
@@ -64,7 +68,12 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 DEFAULT_SAMPLE_RATE = 16000
-MAX_AUDIO_SECONDS = float(os.environ.get('LYRICS_MAX_AUDIO_SECONDS', '240'))
+from config import LYRICS_NARRATIVE_MODE as NARRATIVE_MODE
+
+MAX_AUDIO_SECONDS = float(os.environ.get('LYRICS_MAX_AUDIO_SECONDS', '7200' if NARRATIVE_MODE else '240'))
+NARRATIVE_CHUNK_CHARS = int(os.environ.get('LYRICS_NARRATIVE_CHUNK_CHARS', '1800'))
+NARRATIVE_TITLE_WEIGHT = float(os.environ.get('LYRICS_NARRATIVE_TITLE_WEIGHT', '0.3'))
+ASR_TIMEOUT_S = int(os.environ.get('LYRICS_ASR_TIMEOUT', '7200' if NARRATIVE_MODE else '300'))
 
 from cpu_budget import usable_cpu_count
 
@@ -935,7 +944,7 @@ def _prepare_audio_clip(
 
 
 def _run_asr_transcription(audio_clip: np.ndarray, sr: int, threads: int) -> Dict[str, object]:
-    _ASR_TIMEOUT_S = 300
+    _ASR_TIMEOUT_S = ASR_TIMEOUT_S
     logger.info(
         'STEP 5 start: whisper_small transcription (threads=%s, timeout=%ss)',
         threads,
@@ -990,7 +999,10 @@ def _asr_confidence(transcription: Dict[str, object]) -> Optional[float]:
 def _postprocess_asr(
     transcription: Dict[str, object]
 ) -> Tuple[str, int, str, Optional[float], str]:
-    raw_text = _sanitize_lyrics_text((transcription.get('text') or '').strip())
+    raw_text = _sanitize_lyrics_text(
+        (transcription.get('text') or '').strip(),
+        max_words=10**9 if NARRATIVE_MODE else 300,
+    )
     whisper_raw_len = len(raw_text)
     asr_lang = (transcription.get('language') or '').strip().lower()
     asr_avg_logprob = _asr_confidence(transcription)
@@ -1057,12 +1069,46 @@ def _langdetect_text_lyrics(raw_text: str, detected_lang: str) -> Tuple[str, str
     return raw_text, detected_lang
 
 
-def _finalize_embedding(final_text: str) -> Tuple[Optional[np.ndarray], np.ndarray]:
+def _chunk_text(text: str, n: int) -> List[str]:
+    return [text[i:i + n] for i in range(0, len(text), max(1, n))]
+
+
+def _embed_chunked(text: str, tokenizer, model) -> Optional[np.ndarray]:
+    pairs = []
+    for chunk in _chunk_text(text, NARRATIVE_CHUNK_CHARS):
+        vec = _embed_text(chunk, tokenizer, model)
+        if vec is not None and getattr(vec, 'size', 0):
+            pairs.append((vec, len(chunk)))
+    if not pairs:
+        return None
+    mean = np.average(np.stack([v for v, _ in pairs]), axis=0, weights=[w for _, w in pairs]).astype(np.float32)
+    norm = float(np.linalg.norm(mean))
+    return mean / norm if norm > 0 else mean
+
+
+def _blend_title(embedding: Optional[np.ndarray], title_vec: np.ndarray) -> np.ndarray:
+    if embedding is None or getattr(embedding, 'size', 0) == 0:
+        return title_vec
+    mixed = embedding + NARRATIVE_TITLE_WEIGHT * title_vec
+    norm = float(np.linalg.norm(mixed))
+    return (mixed / norm if norm > 0 else mixed).astype(np.float32)
+
+
+def _finalize_embedding(
+    final_text: str, title: str = ''
+) -> Tuple[Optional[np.ndarray], np.ndarray]:
     embedding = None
     axis_vector: np.ndarray = np.zeros(0, dtype=np.float32)
-    if len(final_text) >= MIN_CHARS_FOR_EMBEDDING:
+    use_title = NARRATIVE_MODE and bool(title.strip())
+    if len(final_text) >= MIN_CHARS_FOR_EMBEDDING or use_title:
         tokenizer, model = load_topic_embedding_model()
-        embedding = _embed_text(final_text, tokenizer, model)
+        if len(final_text) >= MIN_CHARS_FOR_EMBEDDING:
+            embed = _embed_chunked if NARRATIVE_MODE else _embed_text
+            embedding = embed(final_text, tokenizer, model)
+        if use_title:
+            title_vec = _embed_text(title.strip(), tokenizer, model)
+            if title_vec is not None and getattr(title_vec, 'size', 0):
+                embedding = _blend_title(embedding, title_vec)
         if embedding is not None:
             axis_vector = _score_axes(embedding)
 
@@ -1182,6 +1228,6 @@ def analyze_lyrics(
     logger.info('STEP 9 start: embedding + axis scoring (chars=%s)', len(final_text))
     if len(final_text) < MIN_CHARS_FOR_EMBEDDING:
         raw_text = final_text = ''
-    embedding, axis_vector = _finalize_embedding(final_text)
+    embedding, axis_vector = _finalize_embedding(final_text, track or '')
 
     return _lyrics_result(raw_text, final_text, detected_lang, used_seconds, embedding, axis_vector)

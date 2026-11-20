@@ -353,3 +353,101 @@ class TestSoftmax:
         v = np.array([], dtype=np.float32)
         out = lt._softmax(v, temperature=0.1)
         assert out.size == 0
+
+
+class TestNarrativeChunking:
+    def test_chunk_text_splits_and_keeps_everything(self, lt):
+        text = 'x' * 4000
+        chunks = lt._chunk_text(text, 1800)
+        assert [len(c) for c in chunks] == [1800, 1800, 400]
+        assert ''.join(chunks) == text
+
+    def test_chunk_text_splits_text_without_spaces(self, lt):
+        assert len(lt._chunk_text('\u4f60\u597d' * 1500, 1800)) == 2
+
+    def test_embed_chunked_weights_chunks_by_length(self, lt):
+        vecs = iter([np.array([1, 0], dtype=np.float32), np.array([0, 1], dtype=np.float32)])
+        with patch.object(lt, 'NARRATIVE_CHUNK_CHARS', 30), patch.object(
+            lt, '_embed_text', side_effect=lambda *a, **k: next(vecs)
+        ):
+            out = lt._embed_chunked('a' * 40, None, None)
+        assert np.linalg.norm(out) == pytest.approx(1.0, abs=1e-6)
+        assert out[0] > out[1] > 0
+
+    def test_embed_chunked_none_when_nothing_embeds(self, lt):
+        with patch.object(lt, '_embed_text', return_value=None):
+            assert lt._embed_chunked('abc', None, None) is None
+
+
+class TestWindowLanguages:
+    def test_unsure_windows_take_nearest_confident_language(self):
+        from lyrics.whisper_onnx import fill_window_languages
+
+        got = fill_window_languages([('nn', 0.3), ('en', 0.9), ('nn', 0.4), ('it', 0.8), ('en', 0.2)], 0.7)
+        assert got == ['en', 'en', 'en', 'it', 'it']
+
+    def test_none_when_no_window_is_confident(self):
+        from lyrics.whisper_onnx import fill_window_languages
+
+        assert fill_window_languages([('nn', 0.3), ('de', 0.5)], 0.7) is None
+
+
+class TestTitleBlend:
+    def test_title_only_when_no_transcript_embedding(self, lt):
+        t = np.array([0, 1], dtype=np.float32)
+        assert lt._blend_title(None, t) is t
+
+    def test_blend_is_unit_and_leans_to_transcript(self, lt):
+        e = np.array([1, 0], dtype=np.float32)
+        t = np.array([0, 1], dtype=np.float32)
+        with patch.object(lt, 'NARRATIVE_TITLE_WEIGHT', 0.3):
+            out = lt._blend_title(e, t)
+        assert np.linalg.norm(out) == pytest.approx(1.0, abs=1e-6)
+        assert out[0] > out[1] > 0
+
+
+class TestFinalizeEmbeddingTitle:
+    def test_no_speech_uses_title_vector_not_sentinel(self, lt):
+        title_vec = np.array([0, 1], dtype=np.float32)
+        with patch.object(lt, 'NARRATIVE_MODE', True), patch.object(
+            lt, 'load_topic_embedding_model', return_value=(None, None)
+        ), patch.object(lt, '_embed_text', return_value=title_vec), patch.object(
+            lt, '_score_axes', return_value=np.zeros(3, dtype=np.float32)
+        ):
+            emb, axes = lt._finalize_embedding('', '[F4M] Some Title')
+        assert emb is title_vec
+        assert axes.shape == (3,)
+
+    def test_music_mode_ignores_title(self, lt):
+        with patch.object(lt, 'NARRATIVE_MODE', False), patch.object(
+            lt, '_make_instrumental_sentinel', return_value=(np.ones(2, dtype=np.float32), np.zeros(1, dtype=np.float32))
+        ):
+            emb, _ = lt._finalize_embedding('', 'Some Title')
+        assert emb.tolist() == [1.0, 1.0]
+
+
+class TestPerWindowLanguageDecoding:
+    def test_each_window_is_decoded_with_its_own_language(self):
+        from lyrics import whisper_onnx as w
+
+        pipe = object.__new__(w._OnnxWhisperPipeline)
+        pipe.mel_filters = None
+        tokens = []
+
+        def process(enc, idx, n, samples, token, max_new):
+            tokens.append(token)
+            return 'text', -0.3
+
+        audio = np.concatenate(
+            [np.full(w.WHISPER_CHUNK_SAMPLES, 1.0, np.float32), np.full(w.WHISPER_CHUNK_SAMPLES, 2.0, np.float32)]
+        )
+        with patch.object(w, 'NARRATIVE_MODE', True), patch.object(
+            w, '_log_mel_spectrogram', lambda x, f: x
+        ), patch.object(pipe, '_encode', lambda m: m), patch.object(
+            pipe, '_detect_language', lambda enc: ('en', 0.9) if enc[0] == 1.0 else ('it', 0.9)
+        ), patch.object(pipe, '_resolve_lang_token_id', lambda code: code), patch.object(
+            pipe, '_process_chunk', side_effect=process
+        ):
+            out = pipe.transcribe(audio)
+        assert tokens == ['en', 'it']
+        assert out['text'] == 'text text'

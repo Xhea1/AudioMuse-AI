@@ -21,6 +21,10 @@ Main Features:
   returning avg_logprob for upstream gating.
 * Lazy thread-safe session load with a minimum-free-RAM guard (raises
   WhisperLoadRefused) plus an unload hook for memory reclaim.
+* Narrative mode (LYRICS_NARRATIVE_MODE) detects the language per 30 s window
+  instead of once from the first, so bilingual works decode correctly and a
+  breathy opening cannot drop the whole file; unsure windows take the nearest
+  confident language.
 """
 
 from __future__ import annotations
@@ -42,6 +46,20 @@ logger = logging.getLogger(__name__)
 LYRICS_WHISPER_MIN_FREE_RAM_GB = float(os.environ.get("LYRICS_WHISPER_MIN_FREE_RAM_GB", "2.5"))
 
 LYRICS_WHISPER_LANG_CONFIDENCE = float(os.environ.get("LYRICS_WHISPER_LANG_CONFIDENCE", "0.7"))
+
+from config import LYRICS_NARRATIVE_MODE as NARRATIVE_MODE
+
+
+def fill_window_languages(detected, min_prob):
+    sure = [c if p >= min_prob else None for c, p in detected]
+    if not any(sure):
+        return None
+    last = next(c for c in sure if c)
+    out = []
+    for c in sure:
+        last = c or last
+        out.append(last)
+    return out
 
 WHISPER_MAX_NEW_TOKENS = int(os.environ.get("LYRICS_WHISPER_MAX_NEW_TOKENS", "180"))
 
@@ -663,8 +681,9 @@ class _OnnxWhisperPipeline:
 
         first_mel = _log_mel_spectrogram(windows[0], self.mel_filters)
         first_enc = self._encode(first_mel)
+        per_window = NARRATIVE_MODE and not language
         detected_code, detected_prob = self._resolve_language(first_enc, language)
-        if not language and detected_prob < LYRICS_WHISPER_LANG_CONFIDENCE:
+        if not per_window and not language and detected_prob < LYRICS_WHISPER_LANG_CONFIDENCE:
             logger.info(
                 "Whisper-small: language confidence %.3f < %.2f - "
                 "dropping transcript, treating as instrumental",
@@ -678,8 +697,6 @@ class _OnnxWhisperPipeline:
                 "avg_logprob": float('-inf'),
             }
 
-        lang_token_id = self._resolve_lang_token_id(detected_code)
-
         texts: List[str] = []
         chunk_logprobs: List[float] = []
         encoder_outputs: List[np.ndarray] = [first_enc]
@@ -687,13 +704,31 @@ class _OnnxWhisperPipeline:
             mel = _log_mel_spectrogram(w, self.mel_filters)
             encoder_outputs.append(self._encode(mel))
 
+        lang_codes = [detected_code] * len(encoder_outputs)
+        if per_window:
+            lang_codes = fill_window_languages(
+                [(detected_code, detected_prob)]
+                + [self._detect_language(e) for e in encoder_outputs[1:]],
+                LYRICS_WHISPER_LANG_CONFIDENCE,
+            )
+            if lang_codes is None:
+                logger.info("Whisper-small: no window reached language confidence - treating as instrumental")
+                return {
+                    "text": "",
+                    "language": "",
+                    "duration": audio_duration,
+                    "avg_logprob": float('-inf'),
+                }
+            detected_code = max(set(lang_codes), key=lang_codes.count)
+            logger.info("Whisper-small: per-window languages %s", sorted(set(lang_codes)))
+
         for chunk_idx, enc in enumerate(encoder_outputs):
             cleaned, avg_lp = self._process_chunk(
                 enc,
                 chunk_idx,
                 len(encoder_outputs),
                 len(windows[chunk_idx]),
-                lang_token_id,
+                self._resolve_lang_token_id(lang_codes[chunk_idx]),
                 max_new_tokens,
             )
             if cleaned:
