@@ -451,3 +451,35 @@ class TestPerWindowLanguageDecoding:
             out = pipe.transcribe(audio)
         assert tokens == ['en', 'it']
         assert out['text'] == 'text text'
+
+
+class TestFindSimilarByItem:
+    def _mgr(self):
+        from tasks import lyrics_manager
+
+        return lyrics_manager
+
+    def test_item_with_only_the_placeholder_vector_has_no_neighbours(self):
+        m = self._mgr()
+        placeholder = np.zeros(4, dtype=np.float32)
+        placeholder[0] = 1.0
+        with patch.dict(m._LYRICS_INDEX_CACHE, {'loaded': True, 'index': object()}), patch.object(
+            m, '_item_vector', return_value=None
+        ), patch.object(m, '_search_by_vector') as search:
+            assert m.find_similar_by_item('a', 5) == []
+        search.assert_not_called()
+
+    def test_seed_is_excluded_and_limit_is_passed(self):
+        m = self._mgr()
+        vec = np.array([0.5, 0.5], dtype=np.float32)
+        with patch.dict(m._LYRICS_INDEX_CACHE, {'loaded': True, 'index': object()}), patch.object(
+            m, '_item_vector', return_value=vec
+        ), patch.object(m, '_search_by_vector', return_value=[{'item_id': 'b'}]) as search:
+            assert m.find_similar_by_item('a', 7) == [{'item_id': 'b'}]
+        assert search.call_args.args[1] == 7
+        assert search.call_args.kwargs['seed']['item_id'] == 'a'
+
+    def test_empty_when_index_not_loaded(self):
+        m = self._mgr()
+        with patch.dict(m._LYRICS_INDEX_CACHE, {'loaded': False, 'index': None}):
+            assert m.find_similar_by_item('a', 5) == []

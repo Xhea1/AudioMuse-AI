@@ -472,7 +472,7 @@ class TestClapTextSearchGetsTheSameTreatment:
 
         for source in (
             inspect.getsource(clap_text_search.search_by_embedding),
-            inspect.getsource(lyrics_manager.search_by_text),
+            inspect.getsource(lyrics_manager._search_by_vector),
             inspect.getsource(lyrics_manager.search_by_axes),
         ):
             assert 'overfetch_size(limit)' in source
@@ -653,7 +653,7 @@ class TestEachSearchPathPassesItsOwnThreshold:
 
         from tasks import lyrics_manager
 
-        source = inspect.getsource(lyrics_manager.search_by_text)
+        source = inspect.getsource(lyrics_manager._search_by_vector)
         assert 'DUPLICATE_DISTANCE_THRESHOLD_COSINE_LYRICS_TEXT' in source
         assert 'DUPLICATE_DISTANCE_THRESHOLD_COSINE_LYRICS_AXIS' not in source
 

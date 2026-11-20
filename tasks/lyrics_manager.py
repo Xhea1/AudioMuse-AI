@@ -17,6 +17,8 @@ lifetime used to embed text queries.
 Main Features:
 * build_and_store_lyrics_index / build_and_store_lyrics_axes_index and the
   load/refresh helpers: construct and hold the two lyrics indexes in memory.
+* find_similar_by_item: nearest works to a stored item vector (the item itself
+  excluded; none when it only has the instrumental placeholder).
 * search_by_text: embeds a query with gte-multilingual-base and returns nearest
   lyrics, with metadata joined from the score table.
 * search_by_axes / get_axes_definition: rank songs against per-axis targets.
@@ -349,15 +351,80 @@ def _embed_text_query(query_text: str):
         return embed_query_text(query_text)
 
 
+def _search_by_vector(query_vec, limit, artist_cap, seed=None) -> List[Dict]:
+    from config import (
+        MAX_SONGS_PER_ARTIST,
+        DUPLICATE_DISTANCE_THRESHOLD_COSINE_LYRICS_TEXT,
+        DUPLICATE_DISTANCE_CHECK_LOOKBACK,
+    )
+
+    if artist_cap is None:
+        artist_cap = MAX_SONGS_PER_ARTIST
+    artist_cap = artist_cap if artist_cap and artist_cap > 0 else 0
+    fetch_size = overfetch_size(limit)
+
+    ivf_index = _LYRICS_INDEX_CACHE['index']
+    id_map = _LYRICS_INDEX_CACHE['id_map'] or {}
+    from .paged_ivf import begin_query
+
+    begin_query(ivf_index)
+    num_to_query = min(fetch_size, len(ivf_index))
+    if num_to_query <= 0:
+        return []
+
+    neighbor_ids, distances = ivf_index.query(query_vec, k=num_to_query)
+    candidate_item_ids = [id_map.get(int(v)) for v in neighbor_ids]
+    candidate_item_ids = [iid for iid in candidate_item_ids if iid]
+    metadata_map = _fetch_lyrics_metadata(candidate_item_ids)
+
+    return _build_capped_results(
+        ivf_index,
+        id_map,
+        metadata_map,
+        neighbor_ids,
+        distances,
+        limit,
+        artist_cap,
+        dedup_names=True,
+        dup_threshold=DUPLICATE_DISTANCE_THRESHOLD_COSINE_LYRICS_TEXT,
+        lookback=DUPLICATE_DISTANCE_CHECK_LOOKBACK,
+        seed=seed,
+    )
+
+
+def _item_vector(item_id: str) -> Optional[np.ndarray]:
+    from database import get_db
+
+    with get_db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT embedding FROM lyrics_embedding WHERE item_id = %s", (item_id,))
+        row = cur.fetchone()
+    if not row or row[0] is None:
+        return None
+    vec = np.frombuffer(bytes(row[0]), dtype=np.float32)
+    return vec if vec.size and vec[1:].any() else None
+
+
+def find_similar_by_item(item_id: str, limit: Optional[int] = None) -> List[Dict]:
+    from config import LYRICS_ENABLED, LYRICS_TEXT_DEFAULT_LIMIT
+
+    if not LYRICS_ENABLED or not _LYRICS_INDEX_CACHE['loaded'] or _LYRICS_INDEX_CACHE['index'] is None:
+        return []
+    vec = _item_vector(item_id)
+    if vec is None:
+        return []
+    try:
+        return _search_by_vector(vec, limit or LYRICS_TEXT_DEFAULT_LIMIT, None, seed={'item_id': item_id, 'vector': vec})
+    except Exception:
+        logger.exception(f"Lyrics similar-by-item failed for {item_id!r}")
+        return []
+
+
 def search_by_text(
     query_text: str, limit: Optional[int] = None, artist_cap: Optional[int] = None
 ) -> List[Dict]:
     from config import (
         LYRICS_ENABLED,
         LYRICS_TEXT_DEFAULT_LIMIT,
-        MAX_SONGS_PER_ARTIST,
-        DUPLICATE_DISTANCE_THRESHOLD_COSINE_LYRICS_TEXT,
-        DUPLICATE_DISTANCE_CHECK_LOOKBACK,
     )
 
     if limit is None:
@@ -378,37 +445,7 @@ def search_by_text(
             logger.error(f"Failed to embed lyrics query: {query_text!r}")
             return []
 
-        if artist_cap is None:
-            artist_cap = MAX_SONGS_PER_ARTIST
-        artist_cap = artist_cap if artist_cap and artist_cap > 0 else 0
-        fetch_size = overfetch_size(limit)
-
-        ivf_index = _LYRICS_INDEX_CACHE['index']
-        id_map = _LYRICS_INDEX_CACHE['id_map'] or {}
-        from .paged_ivf import begin_query
-
-        begin_query(ivf_index)
-        num_to_query = min(fetch_size, len(ivf_index))
-        if num_to_query <= 0:
-            return []
-
-        neighbor_ids, distances = ivf_index.query(query_vec, k=num_to_query)
-        candidate_item_ids = [id_map.get(int(v)) for v in neighbor_ids]
-        candidate_item_ids = [iid for iid in candidate_item_ids if iid]
-        metadata_map = _fetch_lyrics_metadata(candidate_item_ids)
-
-        results = _build_capped_results(
-            ivf_index,
-            id_map,
-            metadata_map,
-            neighbor_ids,
-            distances,
-            limit,
-            artist_cap,
-            dedup_names=True,
-            dup_threshold=DUPLICATE_DISTANCE_THRESHOLD_COSINE_LYRICS_TEXT,
-            lookback=DUPLICATE_DISTANCE_CHECK_LOOKBACK,
-        )
+        results = _search_by_vector(query_vec, limit, artist_cap)
 
         logger.info(
             f"Lyrics text search '{query_text}': {len(results)} results "

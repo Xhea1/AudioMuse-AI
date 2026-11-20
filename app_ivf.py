@@ -32,6 +32,7 @@ from config import (
     SIMILARITY_DEFAULT_N_RESULTS,
     SIMILARITY_RADIUS_DEFAULT,
     MOOD_CENTROIDS_FILE,
+    LYRICS_NARRATIVE_MODE,
 )
 from app_helper import (
     SEARCH_MIN_QUERY_LENGTH,
@@ -558,6 +559,17 @@ def get_similar_tracks_endpoint():
             "Request must include either 'item_id' or both 'title' and 'artist', "
             "or 'mood' and 'centroid_index'.",
         )
+
+    if LYRICS_NARRATIVE_MODE:
+        from tasks.lyrics_manager import find_similar_by_item
+
+        found = find_similar_by_item(target_item_id, num_neighbors)
+        if not found:
+            return json_error(
+                ERR_NOT_FOUND, "No transcript-based neighbours for this track (no speech or index not built)."
+            )
+        rows = [{'item_id': r['item_id'], 'distance': 1.0 - r['similarity']} for r in found]
+        return jsonify(_serialize_neighbor_results(rows, num_neighbors))
 
     try:
         neighbor_results = find_nearest_neighbors_by_id(
