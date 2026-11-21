@@ -36,6 +36,8 @@ class FakeConn:
     def __init__(self, rows):
         self.rows = rows
         self.sql = []
+        self.full = []
+        self.backup_exists = False
         self.read_only = None
 
     def cursor(self):
@@ -47,7 +49,11 @@ class FakeConn:
     def __exit__(self, *a):
         return False
 
+    def fetchone(self):
+        return ('lyrics_embedding_pre_narrative',) if self.backup_exists else (None,)
+
     def execute(self, sql, params=None):
+        self.full.append(sql)
         self.sql.append(sql.split()[0] + ' ' + ' '.join(sql.split()[1:4]))
 
     def fetchall(self):
@@ -98,3 +104,19 @@ def test_apply_refuses_when_narrative_mode_is_off(script, monkeypatch):
     code, conn = _run(script, monkeypatch, ['--apply'], narrative=False)
     assert code == 2
     assert conn.sql == []
+
+
+def test_tracks_already_in_the_backup_table_are_skipped(script, monkeypatch):
+    conn = FakeConn(_rows())
+    conn.backup_exists = True
+    monkeypatch.setattr(script, 'connect_raw', lambda read_only=False: conn)
+    monkeypatch.setattr(script.config, 'LYRICS_NARRATIVE_MODE', True)
+    script.main(['--limit', '5'])
+    select = next(q for q in conn.full if q.lstrip().startswith('SELECT s.item_id'))
+    assert 'NOT EXISTS' in select and 'lyrics_embedding_pre_narrative' in select
+
+
+def test_first_run_has_no_backup_table_to_exclude(script, monkeypatch):
+    code, conn = _run(script, monkeypatch, [])
+    select = next(q for q in conn.full if q.lstrip().startswith('SELECT s.item_id'))
+    assert 'NOT EXISTS' not in select

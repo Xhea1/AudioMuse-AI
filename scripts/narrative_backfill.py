@@ -22,7 +22,8 @@ Main Features:
   them; it refuses to run unless LYRICS_NARRATIVE_MODE is on, because the re-run
   would otherwise rebuild the same 4-minute vectors.
 * --restore puts back backed-up rows that have not been recomputed yet.
-* --limit, --author and --min-duration select a small test batch first.
+* Tracks already in the backup table count as done and are skipped, so --limit
+  works as a repeatable batch size; --author and --min-duration also narrow it.
 
 After --apply, start a normal analysis run; the lyrics index is rebuilt by it.
 """
@@ -55,6 +56,9 @@ def select_rows(cur, args):
         "WHERE COALESCE(s.duration, 0) >= %s"
     )
     params = [args.min_duration]
+    cur.execute("SELECT to_regclass(%s)", (BACKUP,))
+    if cur.fetchone()[0] is not None:
+        sql += f" AND NOT EXISTS (SELECT 1 FROM {BACKUP} b WHERE b.item_id = le.item_id)"
     if args.author:
         sql += " AND s.author ILIKE %s"
         params.append(args.author)
