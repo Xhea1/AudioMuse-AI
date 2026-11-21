@@ -1924,3 +1924,15 @@ def _apply_db_overrides():
 
 
 _apply_db_overrides()
+
+
+def _apply_narrative_floor():
+    # Saved setup values override the defaults above, so an instance first set up for music keeps
+    # AUDIO_LOAD_TIMEOUT=600 and the MusiCNN "instrumental" skip; narrative mode needs neither.
+    global AUDIO_LOAD_TIMEOUT, LYRICS_MUSICNN_SKIP
+    if LYRICS_NARRATIVE_MODE:
+        AUDIO_LOAD_TIMEOUT = max(AUDIO_LOAD_TIMEOUT, 7200)
+        LYRICS_MUSICNN_SKIP = False
+
+
+_apply_narrative_floor()

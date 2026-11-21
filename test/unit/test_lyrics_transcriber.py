@@ -483,3 +483,28 @@ class TestFindSimilarByItem:
         m = self._mgr()
         with patch.dict(m._LYRICS_INDEX_CACHE, {'loaded': False, 'index': None}):
             assert m.find_similar_by_item('a', 5) == []
+
+
+class TestNarrativeFloor:
+    def test_saved_music_values_cannot_cut_narrative_mode_short(self, monkeypatch):
+        import config
+
+        monkeypatch.setattr(config, 'LYRICS_NARRATIVE_MODE', True)
+        monkeypatch.setattr(config, 'AUDIO_LOAD_TIMEOUT', 600)
+        monkeypatch.setattr(config, 'LYRICS_MUSICNN_SKIP', True)
+        config._apply_narrative_floor()
+        assert config.AUDIO_LOAD_TIMEOUT == 7200
+        assert config.LYRICS_MUSICNN_SKIP is False
+
+    def test_a_larger_timeout_is_kept_and_music_mode_is_untouched(self, monkeypatch):
+        import config
+
+        monkeypatch.setattr(config, 'LYRICS_NARRATIVE_MODE', True)
+        monkeypatch.setattr(config, 'AUDIO_LOAD_TIMEOUT', 10000)
+        config._apply_narrative_floor()
+        assert config.AUDIO_LOAD_TIMEOUT == 10000
+        monkeypatch.setattr(config, 'LYRICS_NARRATIVE_MODE', False)
+        monkeypatch.setattr(config, 'AUDIO_LOAD_TIMEOUT', 600)
+        monkeypatch.setattr(config, 'LYRICS_MUSICNN_SKIP', True)
+        config._apply_narrative_floor()
+        assert config.AUDIO_LOAD_TIMEOUT == 600 and config.LYRICS_MUSICNN_SKIP is True
